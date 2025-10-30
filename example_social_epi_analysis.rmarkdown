@@ -1,0 +1,589 @@
+---
+title: "Descriptive Statistics with Complex Survey Weights: An Example for Social Epidemiology"
+subtitle: "Analyzing BRFSS 2022 Data with Complex Survey Design"
+author: "David Pletta"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+editor: visual
+---
+
+## Overview
+
+This tutorial demonstrates analyzing complex survey data from the **Behavioral Risk Factor Surveillance System (BRFSS) 2022** to examine health disparities by income level using the full dataset with proper survey weighting methods.
+
+### Learning Objectives
+
+By the end of this tutorial, you will understand how to:
+
+1.  Load and prepare complex survey data (BRFSS)
+2.  Create a proper survey design object accounting for weights, strata, and clusters
+3.  Recode variables for social epidemiology analyses
+4.  Generate descriptive statistics that account for survey design
+5.  Conduct bivariate analyses with design-adjusted p-values
+6.  Interpret design effects and effective sample sizes
+7.  Create publication-ready tables
+
+### Research Question
+
+**Are diabetes prevalence and general health status associated with household income in the US adult population?**
+
+This is a fundamental social epidemiology question examining socioeconomic health disparities.
+
+## Setup
+
+### Load Required Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+library(haven)       # For reading SAS/SPSS/Stata files
+library(dplyr)       # Data manipulation
+library(tidyr)       # Data tidying
+library(survey)      # Complex survey analysis
+library(gtsummary)   # Publication-ready tables
+
+# Set options for better output
+options(width = 100)
+```
+
+::: callout-note
+The `survey` package is essential for analyzing complex survey data. It properly accounts for:
+
+-   **Weights**: Correct for unequal selection probabilities
+-   **Strata**: Account for stratified sampling
+-   **Clusters**: Adjust standard errors for clustering
+:::
+
+## Step 1: Load and Prepare Data
+
+### Load BRFSS Data
+
+We'll load the **full BRFSS 2022 dataset** (≈1.1 GB). This file contains 445,132 observations and may take 1-2 minutes to load depending on your system.
+
+```{r load-data, cache=TRUE}
+# Load full dataset, drop value labels, and select only variables needed for analysis
+# Note: We keep all observations and survey design features intact
+brfss <- haven::read_xpt("data/LLCP2022.XPT") %>%
+  haven::zap_labels() %>%
+  select(
+    # Survey design variables (required for proper analysis)
+    `_LLCPWT`, `_STSTR`, `_PSU`,
+    # Outcome variables
+    DIABETE4, GENHLTH, MEDCOST1,
+    # Primary exposure variable
+    INCOME3,
+    # Covariates
+    `_IMPRACE`, `_AGE65YR`, SEXVAR
+  )
+
+# Check dimensions
+cat("Dataset dimensions:", nrow(brfss), "rows ×", ncol(brfss), "columns\n")
+cat("All", nrow(brfss), "observations retained with survey design variables\n")
+```
+
+::: callout-note
+## About the BRFSS Dataset
+
+The BRFSS 2022 dataset includes: - **445,132 adult respondents** from all 50 states, DC, and US territories - **Pre-calculated survey weights** (`_LLCPWT`) that adjust for selection probability and non-response - **Stratification** (`_STSTR`) and **clustering** (`_PSU`) variables for proper variance estimation - These design features must be specified in your analysis to obtain correct standard errors and p-values
+:::
+
+::: callout-tip
+## Performance Optimization
+
+To speed up computation, we select only the variables needed for this analysis. This reduces memory usage and processing time **without affecting the survey design** - we still have all 445,132 observations with complete survey weights, strata, and PSUs.
+
+The tutorial also uses chunk caching (`cache=TRUE`), so subsequent renders will complete much faster by reusing cached results.
+:::
+
+### Recode Variables for Analysis
+
+Raw BRFSS variables use numeric codes. We need to recode them into meaningful categories with appropriate labels.
+
+```{r recode-variables, cache=TRUE}
+brfss_clean <- brfss %>%
+  mutate(
+    # Diabetes status (3-level categorical outcome)
+    diabetes = case_when(
+      DIABETE4 == 1 ~ "Yes",
+      DIABETE4 == 3 ~ "No",
+      DIABETE4 == 4 ~ "Prediabetes",
+      TRUE ~ NA_character_
+    ),
+    diabetes = factor(diabetes, levels = c("No", "Prediabetes", "Yes")),
+
+    # General health (ordered categorical outcome)
+    genhlth = case_when(
+      GENHLTH == 1 ~ "Excellent",
+      GENHLTH == 2 ~ "Very Good",
+      GENHLTH == 3 ~ "Good",
+      GENHLTH == 4 ~ "Fair",
+      GENHLTH == 5 ~ "Poor",
+      TRUE ~ NA_character_
+    ),
+    genhlth = factor(
+      genhlth,
+      levels = c("Excellent", "Very Good", "Good", "Fair", "Poor"),
+      ordered = TRUE
+    ),
+
+    # Income categories (primary exposure variable)
+    income = case_when(
+      INCOME3 %in% 1:4 ~ "< $25,000",
+      INCOME3 %in% 5:6 ~ "$25,000-$49,999",
+      INCOME3 %in% 7:8 ~ "$50,000-$99,999",
+      INCOME3 %in% 9:11 ~ "$100,000+",
+      TRUE ~ NA_character_
+    ),
+    income = factor(
+      income,
+      levels = c("< $25,000", "$25,000-$49,999",
+                 "$50,000-$99,999", "$100,000+"),
+      ordered = TRUE
+    ),
+
+    # Race/ethnicity
+    race_eth = case_when(
+      `_IMPRACE` == 1 ~ "White, NH",
+      `_IMPRACE` == 2 ~ "Black, NH",
+      `_IMPRACE` == 3 ~ "Asian, NH",
+      `_IMPRACE` == 4 ~ "AI/AN, NH",
+      `_IMPRACE` == 5 ~ "Hispanic",
+      `_IMPRACE` == 6 ~ "Other, NH",
+      TRUE ~ NA_character_
+    ),
+
+    # Age groups
+    age_group = case_when(
+      `_AGE65YR` == 1 ~ "18-64 years",
+      `_AGE65YR` == 2 ~ "65+ years",
+      TRUE ~ NA_character_
+    ),
+
+    # Sex
+    sex = case_when(
+      SEXVAR == 1 ~ "Male",
+      SEXVAR == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+
+    # Healthcare cost barrier
+    cost_barrier = case_when(
+      MEDCOST1 == 1 ~ "Yes",
+      MEDCOST1 == 2 ~ "No",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+::: callout-important
+## Why Recode Variables?
+
+1.  **Clarity**: Text labels are easier to interpret than numeric codes
+2.  **Ordering**: Specifies the order for ordinal variables (important for tables)
+3.  **Missing data**: Explicitly codes "Don't know" and "Refused" as NA
+4.  **Analysis**: Many R functions require factors for categorical variables
+:::
+
+### Check Variable Distributions
+
+Verify your recoding worked correctly.
+
+```{r check-recoding}
+# Diabetes
+cat("Diabetes Status:\n")
+table(brfss_clean$diabetes, useNA = "ifany")
+
+# Income
+cat("\nHousehold Income:\n")
+table(brfss_clean$income, useNA = "ifany")
+
+# General Health
+cat("\nGeneral Health:\n")
+table(brfss_clean$genhlth, useNA = "ifany")
+```
+
+## Step 2: Set Up Survey Design
+
+### Understanding Complex Survey Design
+
+BRFSS uses a **complex, multistage sampling design**:
+
+1.  **Stratification** (`_STSTR`): States are divided into strata to ensure representation
+2.  **Clustering** (`_PSU`): Phone numbers or geographic areas are sampled (reduces costs but increases variance)
+3.  **Weighting** (`_LLCPWT`): Adjusts for selection probability and non-response
+
+::: callout-warning
+## Why Survey Design Matters
+
+**Ignoring the survey design leads to:**
+
+-   Incorrect standard errors (usually too small)
+-   Invalid p-values (often falsely significant)
+-   Biased estimates if weights are not used
+
+**Always** specify the survey design for complex surveys like BRFSS.
+:::
+
+### Check for Singleton PSUs
+
+A "singleton PSU" is a stratum with only one primary sampling unit. This can occur in subsamples and causes variance estimation problems.
+
+```{r check-singletons}
+singleton_check <- brfss_clean %>%
+  group_by(`_STSTR`) %>%
+  summarize(n_psu = n_distinct(`_PSU`)) %>%
+  filter(n_psu == 1)
+
+if (nrow(singleton_check) > 0) {
+  cat("WARNING:", nrow(singleton_check), "strata have singleton PSUs\n")
+  cat("Setting option to adjust for lonely PSUs\n\n")
+
+  # This adjusts variance estimation for strata with only one PSU (i.e., lonely PSU adjustnment)
+  options(survey.lonely.psu = "adjust")
+} else {
+  cat("No singleton PSUs detected\n")
+}
+```
+
+::: callout-note
+## Handling Singleton PSUs
+
+The `survey.lonely.psu = "adjust"` option recenters singleton strata on the population mean when estimating variance. Alternative options:
+
+-   `"certainty"`: Treat as sampled with certainty (contributes nothing to variance)
+-   `"remove"`: Remove from variance calculations
+-   `"average"`: Replace the contribution with the average variance across strata (more conservative)
+
+See `?surveyoptions` for details.
+:::
+
+### Create Survey Design Object
+
+```{r create-design, cache=TRUE}
+design <- svydesign(
+  ids = ~`_PSU`,           # Primary sampling units (clusters)
+  strata = ~`_STSTR`,      # Stratification variable
+  weights = ~`_LLCPWT`,    # Final raked weight
+  data = brfss_clean,
+  nest = TRUE              # PSUs are nested within strata
+)
+
+weighted_population <- sum(weights(design))
+
+cat("✓ Survey design created successfully\n")
+cat("Total observations:", nrow(design), "\n")
+cat("Weighted population estimate:",
+    format(weighted_population, big.mark = ","), "\n")
+```
+
+::: callout-tip
+## Survey Design Components
+
+-   **`ids`**: Specifies clustering structure
+-   **`strata`**: Specifies stratification
+-   **`weights`**: Survey weights (inverse probability of selection × non-response adjustment)
+-   **`nest = TRUE`**: PSUs are uniquely identified only within strata
+:::
+
+## Step 3: Descriptive Statistics
+
+### Table 1: Participant Characteristics
+
+Let's create a **Table 1** showing the characteristics of our sample using survey-weighted estimates. We also want to investigate levels of missingness across the variables (also look for possible differential missingness).
+
+::: callout-tip
+## Missing Data Options
+
+The `missing` parameter controls how missing data is displayed:
+
+-   `missing = "ifany"`: Shows "Unknown" row only if missing data exists (recommended for transparency)
+-   `missing = "always"`: Always shows "Unknown" row (even if n=0)
+-   `missing = "no"`: Hides missing data (not recommended unless missingness is negligible)
+
+For research papers, **show missing data** to provide transparency about data quality.
+:::
+
+```{r table1, message=FALSE, cache=TRUE}
+table1 <- design %>%
+  tbl_svysummary(
+    include = c(diabetes, genhlth, income, race_eth, sex, age_group, cost_barrier),
+    label = list(
+      diabetes ~ "Diabetes Status",
+      genhlth ~ "General Health",
+      income ~ "Household Income",
+      race_eth ~ "Race/Ethnicity",
+      sex ~ "Sex",
+      age_group ~ "Age Group",
+      cost_barrier ~ "Could Not Afford Doctor in Past Year"
+    ),
+    missing = "ifany"  # Show missing data if present
+  ) %>%
+  modify_caption("**Table 1. Participant Characteristics (N={N})**")
+
+table1
+```
+
+::: callout-note
+## Reading Survey-Weighted Tables
+
+-   **N**: Estimated population size (weighted)
+-   **n (%)**: Survey-weighted proportions
+-   **Unknown**: Missing data (includes "Don't know" and "Refused")
+-   All estimates account for complex survey design
+-   Standard errors would be larger than simple random sample
+
+**Why show missing data?**
+
+1.  Provides transparency about data quality
+2.  Missing patterns may differ by groups (indicates potential bias)
+3.  Reviewers expect to see extent of missing data
+4.  Helps assess whether complete-case analysis is appropriate
+:::
+
+## Step 4: Bivariate Analysis
+
+### Table 2: Health Outcomes by Income
+
+Now let's examine whether health outcomes differ by income level.
+
+```{r table2, message=FALSE, cache=TRUE}
+table2 <- design %>%
+  tbl_svysummary(
+    include = c(diabetes, genhlth, cost_barrier),
+    by = income,
+    label = list(
+      diabetes ~ "Diabetes Status",
+      genhlth ~ "General Health Status",
+      cost_barrier ~ "Cost Barrier to Care"
+    ),
+    missing = "ifany"  # Show missing data for transparency
+  ) %>%
+  add_overall() %>%
+  add_p() %>%  # Adds design-adjusted p-values
+  bold_p(t = 0.05) %>%
+  modify_caption("**Table 2. Health Outcomes by Household Income**")
+
+table2
+```
+
+::: callout-note
+## Sample Size Difference Between Tables
+
+Table 2 has a smaller N than Table 1 because it excludes observations with missing income data. When stratifying by income, only participants with known income can be included in the analysis. This is methodologically appropriate—observations cannot be assigned to income categories if their income is unknown.
+:::
+
+::: callout-note
+## Note on Missing Data in Statistical Tests
+
+The table shows missing data for transparency, but the **p-values are calculated using complete cases only** (observations with no missing values for the outcome or grouping variable). This is the standard approach for hypothesis testing.
+
+If missing patterns differ substantially by income group, this could indicate **informative missingness** and warrant sensitivity analyses.
+:::
+
+::: callout-important
+## Interpreting P-values
+
+The p-values shown are from **Rao-Scott adjusted chi-square tests**, which properly account for:
+
+-   Survey weights
+-   Clustering (PSUs)
+-   Stratification
+
+These tests are more conservative than standard chi-square tests because they account for the **design effect**.
+:::
+
+### What Tests Are Being Used?
+
+Let's explicitly show what statistical tests are being performed:
+
+```{r explicit-tests}
+design_complete <- subset(design, !is.na(diabetes) & !is.na(income))
+design_complete2 <- subset(design, !is.na(genhlth) & !is.na(income))
+
+income_diabetes <- svyby(~diabetes, ~income, design_complete, svymean, na.rm = TRUE) %>%
+  as_tibble()
+income_health <- svyby(~I(genhlth %in% c("Fair", "Poor")), ~income,
+                       design_complete2, svymean, na.rm = TRUE) %>%
+  as_tibble() %>%
+  rename(fair_poor = `I(genhlth %in% c("Fair", "Poor"))TRUE`)
+
+# Test 1: Diabetes by Income (Categorical outcome)
+cat("═══ Test 1: Diabetes by Income ═══\n")
+
+# Rao-Scott adjusted chi-square test
+test_diabetes <- svychisq(~diabetes + income,
+                          design = design_complete,
+                          statistic = "Chisq")
+
+cat("Chi-square statistic:", round(test_diabetes$statistic, 2), "\n")
+cat("P-value:", format.pval(test_diabetes$p.value, digits = 3), "\n")
+cat("Note: This properly adjusts for design effects\n\n")
+
+# Test 2: General Health by Income (Ordinal outcome)
+cat("═══ Test 2: General Health by Income ═══\n")
+
+# Rao-Scott adjusted chi-square test (ordinal treated as categorical)
+test_genhlth <- svychisq(~genhlth + income,
+                         design = design_complete2,
+                         statistic = "Chisq")
+
+cat("Chi-square statistic:", round(test_genhlth$statistic, 2), "\n")
+cat("P-value:", format.pval(test_genhlth$p.value, digits = 3), "\n")
+cat("Note: Rao-Scott adjustment accounts for weights, clustering, and strata\n")
+```
+
+## Step 5: Understanding Design Effects
+
+### What is a Design Effect?
+
+The **design effect (DEFF)** measures how much the complex survey design increases variance compared to a simple random sample of the same size.
+
+$$
+\text{DEFF} = \frac{\text{Variance}_{\text{complex design}}}{\text{Variance}_{\text{simple random sample}}}
+$$
+
+-   **DEFF = 1**: No design effect (as efficient as simple random sample)
+-   **DEFF = 2**: Variance is doubled (standard error is √2 = 1.41 times larger)
+-   **DEFF \> 3**: High design effect (substantial loss of efficiency)
+
+### Calculate Design Effects
+
+::: callout-tip
+## Technical Note: Using `I()` in Survey Formulas
+
+When calculating means of logical expressions with `svymean()`, we need to wrap them in `I()` (the "AsIs" function). Without `I()`, R would calculate separate means for TRUE and FALSE, giving us two values. The `I()` function tells R to treat the expression as a single indicator variable (0/1).
+
+``` r
+# Wrong: gives two values (TRUE and FALSE proportions)
+svymean(~(diabetes == "Yes"), design)
+
+# Correct: gives one value (proportion where diabetes == "Yes")
+svymean(~I(diabetes == "Yes"), design)
+```
+:::
+
+```{r design-effects}
+cat("═══ Design Effects for Key Estimates ═══\n\n")
+
+# Diabetes prevalence
+# Calculate mean for all levels, then extract "Yes"
+diabetes_prev_all <- svymean(~diabetes, design_complete, deff = TRUE, na.rm = TRUE)
+
+# Extract just the "Yes" level
+diabetes_yes_idx <- which(names(coef(diabetes_prev_all)) == "diabetesYes")
+diabetes_prev_estimate <- coef(diabetes_prev_all)[diabetes_yes_idx]
+diabetes_prev_se <- SE(diabetes_prev_all)[diabetes_yes_idx]
+diabetes_deff <- as.numeric(deff(diabetes_prev_all)[diabetes_yes_idx])
+diabetes_effective_n <- nrow(design_complete) / diabetes_deff
+
+cat("Diabetes Prevalence:\n")
+cat("  Estimate:", round(diabetes_prev_estimate * 100, 1), "%\n")
+cat("  Standard Error Percent:", round(diabetes_prev_se * 100, 2), "%\n")
+cat("  Design Effect (DEFF):", round(diabetes_deff, 2), "\n")
+cat("  Crude sample size:", nrow(design_complete), "\n")
+cat("  Effective sample size:", round(diabetes_effective_n), "\n\n")
+
+# General health prevalence (Fair or Poor)
+# Calculate indicator directly to obtain a single DEFF
+fair_poor_stats <- svymean(
+  ~I(genhlth %in% c("Fair", "Poor")),
+  design_complete2,
+  deff = TRUE
+)
+
+fair_poor_idx <- which(
+  names(coef(fair_poor_stats)) ==
+    "I(genhlth %in% c(\"Fair\", \"Poor\"))TRUE"
+)
+fair_poor_estimate <- coef(fair_poor_stats)[fair_poor_idx]
+fair_poor_se <- SE(fair_poor_stats)[fair_poor_idx]
+fair_poor_deff <- as.numeric(deff(fair_poor_stats)[fair_poor_idx])
+fair_poor_effective_n <- nrow(design_complete2) / fair_poor_deff
+
+cat("Fair/Poor Health Prevalence:\n")
+cat("  Estimate:", round(fair_poor_estimate * 100, 1), "%\n")
+cat("  Standard Error Percent:", round(fair_poor_se * 100, 2), "%\n")
+cat("  Design Effect (DEFF):", round(fair_poor_deff, 2), "\n")
+cat("  Effective sample size:", round(fair_poor_effective_n), "\n")
+```
+
+::: callout-important
+## Key Insight: Design Effects Matter
+
+Notice how the design effect for diabetes is **`r round(diabetes_deff, 2)`** and for fair/poor health is **`r round(fair_poor_deff, 2)`**. These substantial design effects mean:
+
+-   For diabetes: The effective sample size is reduced by approximately `r round((1 - 1 / diabetes_deff) * 100)`% (DEFF = `r round(diabetes_deff, 2)`)
+-   For fair/poor health: The effective sample size is reduced by approximately `r round((1 - 1 / fair_poor_deff) * 100)`% (DEFF = `r round(fair_poor_deff, 2)`)
+-   Standard errors are √DEFF times larger than with simple random sampling
+-   Confidence intervals are wider
+-   Tests have less statistical power
+
+**This is why we must account for survey design.** Ignoring it leads to p-values that are too small and conclusions that may be incorrect. The higher DEFF for fair/poor health (`r round(fair_poor_deff, 2)` vs `r round(diabetes_deff, 2)`) indicates that health status shows more clustering within PSUs than diabetes, likely reflecting neighborhood-level social and environmental determinants of health.
+:::
+
+### Examine the Impact
+
+```{r compare-approaches}
+cat("═══ Comparing Naive vs Design-Based Analysis ═══\n\n")
+
+# Naive approach (WRONG - ignoring survey design)
+naive_table <- table(brfss_clean$diabetes, brfss_clean$income)
+naive_test <- chisq.test(naive_table)
+
+cat("NAIVE ANALYSIS (INCORRECT - ignores survey design):\n")
+cat("  Chi-square:", round(naive_test$statistic, 2), "\n")
+cat("  P-value:", format.pval(naive_test$p.value, digits = 3), "\n")
+cat("  Sample size:", sum(naive_table), "\n\n")
+
+cat("SURVEY-WEIGHTED ANALYSIS (CORRECT):\n")
+cat("  Chi-square:", round(test_diabetes$statistic, 2), "\n")
+cat("  P-value:", format.pval(test_diabetes$p.value, digits = 3), "\n")
+cat("  Effective sample size: ~",
+    round(diabetes_effective_n),
+    "(accounting for DEFF ≈", round(diabetes_deff, 2), ")\n\n")
+
+cat("  Notice: The naive analysis has a p-value that is too small because it underestimates the standard errors\n")
+```
+
+## Step 6: Interpretation and Reporting
+
+### Describing Results
+
+Based on our analysis, we would report:
+
+> **Association Between Income and Health Outcomes**
+>
+> We examined the association between household income and health outcomes in a nationally representative sample of US adults from BRFSS 2022 (weighted N = `r format(round(weighted_population), big.mark = ",")`). All analyses accounted for the complex survey design using survey-weighted methods.
+>
+> **Diabetes prevalence** showed a strong inverse gradient with income (p = `r format.pval(test_diabetes$p.value, digits = 3)`, design-adjusted Rao-Scott χ² = `r round(test_diabetes$statistic, 2)`). Among those earning \<\$25,000, `r round(income_diabetes$diabetesYes[income_diabetes$income == "< $25,000"] * 100, 1)`% reported diabetes compared to `r round(income_diabetes$diabetesYes[income_diabetes$income == "$100,000+"] * 100, 1)`% among those earning ≥\$100,000. The design effect for diabetes prevalence was `r round(diabetes_deff, 2)`, reducing the effective sample size to about `r format(round(diabetes_effective_n), big.mark = ",")` adults.
+>
+> **General health status** also varied significantly by income (p = `r format.pval(test_genhlth$p.value, digits = 3)`, design-adjusted Rao-Scott χ² = `r round(test_genhlth$statistic, 2)`). The proportion reporting fair/poor health decreased from `r round(income_health$fair_poor[income_health$income == "< $25,000"] * 100, 1)`% in the lowest income group to `r round(income_health$fair_poor[income_health$income == "$100,000+"] * 100, 1)`% in the highest income group. The design effect for this outcome was `r round(fair_poor_deff, 2)`, yielding an effective sample size of roughly `r format(round(fair_poor_effective_n), big.mark = ",")`.
+>
+> These findings demonstrate substantial socioeconomic health disparities in the US adult population, with strong evidence of income-based gradients in both chronic disease burden and self-reported health status.
+
+### Reporting Checklist
+
+When reporting survey-weighted analyses, always include:
+
+-   [x] Description of survey design (weights, strata, clusters)
+-   [x] Weighted sample size or population estimate
+-   [x] Statement that analyses accounted for complex design
+-   [x] Appropriate statistical tests (e.g., Rao-Scott chi-square)
+-   [x] Design effects for key estimates (if DEFF \> 2)
+-   [x] Effective sample sizes (if reporting design effects)
+
+## Summary
+
+### What We Learned
+
+1.  **Complex surveys require special handling** - Simple analyses give wrong answers
+2.  **Survey design has three components** - Weights, strata, and clusters
+3.  **Design effects matter** - They can substantially reduce effective sample size
+4.  **Always specify the design** - Use the `survey` package
+5.  **Use design-adjusted tests** - Rao-Scott chi-square, survey-weighted regression
+6.  **Report design effects** - Especially when DEFF \> 2
