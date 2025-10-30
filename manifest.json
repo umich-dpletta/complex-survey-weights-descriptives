@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "locale": "en_US.UTF-8",
+  "metadata": {
+    "appmode": "quarto-static",
+    "entrypoint": "example_social_epi_analysis.qmd",
+    "content_category": "site",
+    "has_parameters": false
+  },
+  "python": null,
+  "quarto": {
+    "version": "1.4.0",
+    "engines": [
+      "knitr"
+    ]
+  },
+  "r": {
+    "version": "4.3.0",
+    "repositories": [
+      {
+        "name": "CRAN",
+        "url": "https://cran.rstudio.com/"
+      }
+    ]
+  },
+  "packages": {
+    "R": [
+      {
+        "package": "haven",
+        "version": "2.5.3",
+        "repository": "CRAN"
+      },
+      {
+        "package": "dplyr",
+        "version": "1.1.2",
+        "repository": "CRAN"
+      },
+      {
+        "package": "tidyr",
+        "version": "1.3.0",
+        "repository": "CRAN"
+      },
+      {
+        "package": "survey",
+        "version": "4.2-1",
+        "repository": "CRAN"
+      },
+      {
+        "package": "gtsummary",
+        "version": "1.7.2",
+        "repository": "CRAN"
+      },
+      {
+        "package": "knitr",
+        "version": "1.43",
+        "repository": "CRAN"
+      },
+      {
+        "package": "rmarkdown",
+        "version": "2.23",
+        "repository": "CRAN"
+      }
+    ]
+  },
+  "files": {
+    "example_social_epi_analysis.qmd": {
+      "checksum": "required"
+    },
+    "README.md": {
+      "checksum": "required"
+    }
+  }
+}
